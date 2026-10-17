@@ -207,6 +207,15 @@
     margin: 20px auto;
   }
   .export-row .export-btn { margin: 0; }
+  .sync-settings {
+    max-width: 500px;
+    margin: 0 auto 20px;
+    background: var(--card);
+    border-radius: 12px;
+    padding: 12px 16px;
+  }
+  .sync-settings summary { cursor: pointer; color: var(--muted); font-size: 0.9rem; }
+  .sync-status { color: var(--muted); font-size: 0.8rem; margin-top: 10px; min-height: 1em; }
   .legend {
     display: flex;
     justify-content: center;
@@ -281,6 +290,19 @@
   <button class="export-btn" id="exportBtn">Export Data (JSON)</button>
   <button class="export-btn" id="exportXlsxBtn">Export to Excel</button>
 </div>
+
+<details class="sync-settings">
+  <summary>Google Sheet sync</summary>
+  <label for="syncUrl">Apps Script web app URL</label>
+  <input type="url" id="syncUrl" placeholder="https://script.google.com/macros/s/.../exec" autocomplete="off">
+  <label for="syncSecret">Secret</label>
+  <input type="password" id="syncSecret" placeholder="Secret from Code.gs" autocomplete="off">
+  <div class="btn-row">
+    <button type="button" class="secondary" id="syncSaveBtn">Save settings</button>
+    <button type="button" class="primary" id="syncAllBtn">Sync all to Sheet</button>
+  </div>
+  <div class="sync-status" id="syncStatus"></div>
+</details>
 
 <div class="modal" id="modal">
   <div class="modal-content">
@@ -621,9 +643,11 @@ function addIncident() {
 
     if (!updated.trigger) return;
 
+    let prevId = null;
     if (editingIndex !== null && data[key] && data[key][editingIndex]) {
       // Update existing — keep old photo unless a new one was chosen
       const old = data[key][editingIndex];
+      prevId = old.time || null;
       updated.photo = photoData || old.photo || null;
       updated.photoPosition = old.photoPosition || null;
       data[key][editingIndex] = updated;
@@ -634,6 +658,7 @@ function addIncident() {
     }
 
     saveData(data);
+    syncIncident(key, updated, prevId);
     closeModal();
     renderCalendar();
     photoInput.value = '';
@@ -800,6 +825,76 @@ document.getElementById('exportXlsxBtn').onclick = async () => {
     btn.disabled = false; btn.textContent = label;
   }
 };
+
+// ---- Google Sheet sync (settings + pending queue live in their own localStorage keys) ----
+const SYNC_URL_KEY = 'max_sheet_sync_url';
+const SYNC_SECRET_KEY = 'max_sheet_sync_secret';
+const SYNC_QUEUE_KEY = 'max_sheet_sync_pending';
+function syncConfig() {
+  return { url: (localStorage.getItem(SYNC_URL_KEY) || '').trim(), secret: localStorage.getItem(SYNC_SECRET_KEY) || '' };
+}
+function syncPayload(date, inc, replaces) {
+  const p = { date, trigger: inc.trigger, distance: inc.distance, severity: inc.severity, recovery: inc.recovery,
+    cue: inc.cue || '', notes: inc.notes || '', time: inc.time, hasPhoto: !!inc.photo };
+  if (replaces && replaces !== inc.time) p.replaces = replaces;
+  return p;
+}
+function loadQueue() { try { return JSON.parse(localStorage.getItem(SYNC_QUEUE_KEY)) || []; } catch (e) { return []; } }
+function saveQueue(q) { if (q.length) localStorage.setItem(SYNC_QUEUE_KEY, JSON.stringify(q)); else localStorage.removeItem(SYNC_QUEUE_KEY); }
+function setSyncStatus(msg) { const el = document.getElementById('syncStatus'); if (el) el.textContent = msg; }
+function queueIncidents(list) {
+  const q = loadQueue();
+  list.forEach(p => { if (!q.some(x => x.time === p.time)) q.push(p); });
+  saveQueue(q);
+}
+// Sends with no-cors: the response is opaque, so only network failures can be detected.
+async function postToSheet(list) {
+  const { url, secret } = syncConfig();
+  if (!url || !list.length) return false;
+  try {
+    await fetch(url, { method: 'POST', mode: 'no-cors', headers: { 'Content-Type': 'text/plain' },
+      body: JSON.stringify({ secret, incidents: list }) });
+    return true;
+  } catch (e) {
+    queueIncidents(list);
+    return false;
+  }
+}
+async function flushSyncQueue() {
+  const q = loadQueue();
+  if (!q.length || !syncConfig().url) return;
+  saveQueue([]);
+  const ok = await postToSheet(q);
+  setSyncStatus(ok ? `Sent ${q.length} pending incident(s).` : `${loadQueue().length} incident(s) waiting to sync.`);
+}
+async function syncIncident(date, inc, replaces) {
+  if (!syncConfig().url) return;
+  await flushSyncQueue();
+  const ok = await postToSheet([syncPayload(date, inc, replaces)]);
+  setSyncStatus(ok ? 'Last incident sent to Sheet.' : `Offline? ${loadQueue().length} incident(s) waiting to sync.`);
+}
+function allIncidentPayloads() {
+  const data = loadData(), list = [];
+  Object.keys(data).sort().forEach(d => (data[d] || []).forEach(i => { if (i && i.time) list.push(syncPayload(d, i)); }));
+  return list;
+}
+document.getElementById('syncUrl').value = syncConfig().url;
+document.getElementById('syncSecret').value = syncConfig().secret;
+document.getElementById('syncSaveBtn').onclick = () => {
+  localStorage.setItem(SYNC_URL_KEY, document.getElementById('syncUrl').value.trim());
+  localStorage.setItem(SYNC_SECRET_KEY, document.getElementById('syncSecret').value.trim());
+  setSyncStatus('Sync settings saved.');
+  flushSyncQueue();
+};
+document.getElementById('syncAllBtn').onclick = async () => {
+  if (!syncConfig().url) { setSyncStatus('Paste the web app URL and save first.'); return; }
+  const list = allIncidentPayloads();
+  saveQueue(loadQueue().filter(p => !list.some(x => x.time === p.time)));
+  await flushSyncQueue();
+  const ok = await postToSheet(list);
+  setSyncStatus(ok ? `Sent ${list.length} incident(s); duplicates are skipped by the Sheet.` : `Couldn't reach the Sheet; ${loadQueue().length} incident(s) queued.`);
+};
+flushSyncQueue();
 
 // Close modal on outside click
 document.getElementById('modal').onclick = (e) => {
