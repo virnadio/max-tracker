@@ -199,6 +199,14 @@
     border-radius: 10px;
     cursor: pointer;
   }
+  .export-row {
+    display: flex;
+    justify-content: center;
+    flex-wrap: wrap;
+    gap: 12px;
+    margin: 20px auto;
+  }
+  .export-row .export-btn { margin: 0; }
   .legend {
     display: flex;
     justify-content: center;
@@ -269,7 +277,10 @@
   <div class="legend-item"><div class="dot" style="background:#b91c1c"></div> Intense</div>
 </div>
 
-<button class="export-btn" id="exportBtn">Export Data (JSON)</button>
+<div class="export-row">
+  <button class="export-btn" id="exportBtn">Export Data (JSON)</button>
+  <button class="export-btn" id="exportXlsxBtn">Export to Excel</button>
+</div>
 
 <div class="modal" id="modal">
   <div class="modal-content">
@@ -664,6 +675,130 @@ document.getElementById('exportBtn').onclick = () => {
   a.href = URL.createObjectURL(blob);
   a.download = 'max_reactivity_log.json';
   a.click();
+};
+
+// ---- Export to Excel (SheetJS, loaded on demand; no photos) ----
+const XLSX_CDN = 'https://cdn.sheetjs.com/xlsx-0.20.3/package/dist/xlsx.full.min.js';
+const XL_LABELS = {
+  trigger: { 'dog': 'Another dog', 'person': 'Person', 'bike': 'Bike / scooter', 'car': 'Car / vehicle', 'sound-startle': 'Startle (sudden movement)', 'other': 'Other' },
+  distance: { 'very-far': '> 30m', 'far': '15-30m', 'medium': '5-15m', 'close': '< 5m' },
+  recovery: { 'instant': 'Instant', '<10s': 'Under 10 seconds', '10-30s': '10–30 seconds', '30-60s': '30–60 seconds', '>1min': 'Over 1 minute' }
+};
+const XL_SEV_LABELS = ['', '1 - Noticed', '2 - Mild', '3 - Moderate', '4 - Strong', '5 - Intense'];
+function xlLabel(kind, v) { return (XL_LABELS[kind] && XL_LABELS[kind][v]) || (v || ''); }
+function xlPad(n) { return String(n).padStart(2, '0'); }
+function xlLocalTime(iso) {
+  if (!iso) return '';
+  const d = new Date(iso);
+  if (isNaN(d)) return '';
+  return `${d.getFullYear()}-${xlPad(d.getMonth() + 1)}-${xlPad(d.getDate())} ${xlPad(d.getHours())}:${xlPad(d.getMinutes())}`;
+}
+function xlRound(n) { return Math.round(n * 100) / 100; }
+
+function buildIncidentRows(data) {
+  const rows = [];
+  Object.keys(data || {}).sort().forEach(date => {
+    (data[date] || []).forEach(i => {
+      const sev = parseInt(i.severity);
+      rows.push({
+        'Date': date,
+        'Logged at (local time)': xlLocalTime(i.time),
+        'Trigger': xlLabel('trigger', i.trigger),
+        'Distance': xlLabel('distance', i.distance),
+        'Severity (1-5)': isNaN(sev) ? '' : sev,
+        'Recovery': xlLabel('recovery', i.recovery),
+        'Cue used': (i.cue || '').trim(),
+        'Notes': (i.notes || '').trim(),
+        'Has photo': i.photo ? 'Yes' : 'No',
+        _t: i.time || ''
+      });
+    });
+  });
+  rows.sort((a, b) => a.Date === b.Date ? (a._t < b._t ? -1 : a._t > b._t ? 1 : 0) : (a.Date < b.Date ? -1 : 1));
+  rows.forEach(r => delete r._t);
+  return rows;
+}
+
+function buildSummaryAoa(rows) {
+  const sevs = rows.map(r => r['Severity (1-5)']).filter(s => s !== '');
+  const avg = sevs.length ? xlRound(sevs.reduce((a, b) => a + b, 0) / sevs.length) : '';
+  const dates = rows.map(r => r.Date).sort();
+  const aoa = [["Max's reactivity summary"], [],
+    ['Total incidents', rows.length],
+    ['Days with incidents', new Set(dates).size],
+    ['First incident', dates[0] || ''],
+    ['Last incident', dates[dates.length - 1] || ''],
+    ['Average severity', avg],
+    ['Max severity', sevs.length ? Math.max(...sevs) : ''],
+    ['Incidents with photo', rows.filter(r => r['Has photo'] === 'Yes').length]];
+  const group = (title, col, order) => {
+    const g = {};
+    rows.forEach(r => { (g[r[col]] = g[r[col]] || []).push(r['Severity (1-5)']); });
+    const keys = order.filter(k => g[k]).concat(Object.keys(g).filter(k => !order.includes(k)).sort());
+    aoa.push([], [title], ['Category', 'Count', 'Avg severity']);
+    keys.forEach(k => {
+      const s = g[k].filter(x => x !== '');
+      aoa.push([k, g[k].length, s.length ? xlRound(s.reduce((a, b) => a + b, 0) / s.length) : '']);
+    });
+  };
+  group('By trigger', 'Trigger', Object.values(XL_LABELS.trigger));
+  group('By distance', 'Distance', Object.values(XL_LABELS.distance));
+  group('By recovery time', 'Recovery', Object.values(XL_LABELS.recovery));
+  aoa.push([], ['By severity'], ['Severity', 'Count']);
+  for (let s = 1; s <= 5; s++) aoa.push([XL_SEV_LABELS[s], sevs.filter(x => x === s).length]);
+  // Weekly trend (weeks start Monday), including empty weeks
+  aoa.push([], ['Weekly trend (week starting Monday)'], ['Week of', 'Incidents', 'Avg severity']);
+  const wk = {};
+  const monday = ds => { const [y, m, d] = ds.split('-').map(Number); const dt = new Date(Date.UTC(y, m - 1, d)); dt.setUTCDate(dt.getUTCDate() - ((dt.getUTCDay() + 6) % 7)); return dt; };
+  rows.forEach(r => { const k = monday(r.Date).toISOString().slice(0, 10); (wk[k] = wk[k] || []).push(r['Severity (1-5)']); });
+  const wkeys = Object.keys(wk).sort();
+  if (wkeys.length) {
+    const end = new Date(wkeys[wkeys.length - 1] + 'T00:00:00Z');
+    for (let d = new Date(wkeys[0] + 'T00:00:00Z'); d <= end; d.setUTCDate(d.getUTCDate() + 7)) {
+      const k = d.toISOString().slice(0, 10), v = wk[k] || [], s = v.filter(x => x !== '');
+      aoa.push([k, v.length, s.length ? xlRound(s.reduce((a, b) => a + b, 0) / s.length) : '']);
+    }
+  }
+  return aoa;
+}
+
+function loadSheetJS() {
+  if (window.XLSX) return Promise.resolve(window.XLSX);
+  return new Promise((resolve, reject) => {
+    const s = document.createElement('script');
+    s.src = XLSX_CDN;
+    s.onload = () => window.XLSX ? resolve(window.XLSX) : reject(new Error('SheetJS failed to load'));
+    s.onerror = () => reject(new Error('Could not load SheetJS (are you offline?)'));
+    document.head.appendChild(s);
+  });
+}
+
+function buildWorkbook(XLSX, data) {
+  const rows = buildIncidentRows(data);
+  const header = ['Date', 'Logged at (local time)', 'Trigger', 'Distance', 'Severity (1-5)', 'Recovery', 'Cue used', 'Notes', 'Has photo'];
+  const ws1 = XLSX.utils.json_to_sheet(rows, { header });
+  ws1['!cols'] = [12, 20, 22, 10, 13, 17, 40, 70, 10].map(wch => ({ wch }));
+  ws1['!autofilter'] = { ref: XLSX.utils.encode_range({ s: { r: 0, c: 0 }, e: { r: Math.max(rows.length, 1), c: header.length - 1 } }) };
+  const ws2 = XLSX.utils.aoa_to_sheet(buildSummaryAoa(rows));
+  ws2['!cols'] = [{ wch: 34 }, { wch: 12 }, { wch: 14 }];
+  const wb = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(wb, ws1, 'Incidents');
+  XLSX.utils.book_append_sheet(wb, ws2, 'Summary');
+  return wb;
+}
+
+document.getElementById('exportXlsxBtn').onclick = async () => {
+  const btn = document.getElementById('exportXlsxBtn');
+  const label = btn.textContent;
+  btn.disabled = true; btn.textContent = 'Preparing…';
+  try {
+    const XLSX = await loadSheetJS();
+    XLSX.writeFile(buildWorkbook(XLSX, loadData()), 'max_reactivity_log.xlsx');
+  } catch (err) {
+    alert('Excel export failed: ' + err.message);
+  } finally {
+    btn.disabled = false; btn.textContent = label;
+  }
 };
 
 // Close modal on outside click
