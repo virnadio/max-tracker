@@ -258,6 +258,81 @@
     display: inline-block;
     text-align: center;
   }
+  /* Full-screen pinch-zoom photo viewer for incident photos */
+  .photo-viewer {
+    display: none;
+    position: fixed;
+    inset: 0;
+    z-index: 300;
+    background: rgba(0,0,0,0.92);
+    touch-action: none;
+    overscroll-behavior: none;
+  }
+  .photo-viewer.open { display: block; }
+  body.photo-viewer-open {
+    overflow: hidden;
+    touch-action: none;
+    overscroll-behavior: none;
+  }
+  .photo-viewer-close {
+    position: absolute;
+    top: max(12px, env(safe-area-inset-top));
+    right: max(12px, env(safe-area-inset-right));
+    z-index: 2;
+    width: 44px;
+    height: 44px;
+    border: none;
+    border-radius: 50%;
+    background: rgba(30, 41, 59, 0.95);
+    color: var(--text);
+    font-size: 1.75rem;
+    line-height: 1;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    box-shadow: 0 2px 8px rgba(0,0,0,0.4);
+  }
+  .photo-viewer-close:hover,
+  .photo-viewer-close:focus {
+    background: var(--accent);
+    color: #0f172a;
+    outline: none;
+  }
+  .photo-viewer-stage {
+    position: absolute;
+    inset: 0;
+    overflow: hidden;
+    touch-action: none;
+    cursor: grab;
+  }
+  .photo-viewer-stage:active { cursor: grabbing; }
+  .photo-viewer-stage img {
+    position: absolute;
+    top: 0;
+    left: 0;
+    max-width: none;
+    max-height: none;
+    transform-origin: 0 0;
+    touch-action: none;
+    user-select: none;
+    -webkit-user-drag: none;
+    will-change: transform;
+  }
+  .photo-viewer-hint {
+    position: absolute;
+    bottom: max(16px, env(safe-area-inset-bottom));
+    left: 50%;
+    transform: translateX(-50%);
+    z-index: 2;
+    font-size: 0.75rem;
+    color: rgba(241,245,249,0.6);
+    background: rgba(15,23,42,0.55);
+    padding: 4px 10px;
+    border-radius: 6px;
+    pointer-events: none;
+    white-space: nowrap;
+  }
 </style>
 </head>
 <body>
@@ -308,6 +383,15 @@
   </div>
   <div class="sync-status" id="syncStatus"></div>
 </details>
+
+
+<div id="photoViewer" class="photo-viewer" aria-hidden="true">
+  <button type="button" class="photo-viewer-close" id="photoViewerClose" aria-label="Close photo">&times;</button>
+  <div class="photo-viewer-stage" id="photoViewerStage">
+    <img id="photoViewerImg" alt="Incident photo">
+  </div>
+  <div class="photo-viewer-hint">Pinch / scroll to zoom · Double-tap · Tap outside to close</div>
+</div>
 
 <div class="modal" id="modal">
   <div class="modal-content">
@@ -492,7 +576,7 @@ function openModal(date) {
       ${i.photo ? `
         <div class="incident-thumb-wrap" data-idx="${idx}">
           <img class="incident-thumb" src="${i.photo}" style="object-position: ${i.photoPosition || '50% 50%'};" alt="incident photo">
-          <div class="photo-hint">Drag to center</div>
+          <div class="photo-hint">Drag to center · Tap to zoom</div>
         </div>
       ` : ''}
       <div style="margin-top:8px; display:flex; gap:8px;">
@@ -502,12 +586,14 @@ function openModal(date) {
     </div>
   `).join('') : '<p style="color:#94a3b8;margin-bottom:12px;">No incidents logged this day.</p>';
 
-  // Wire drag-to-center on photos
+  // Wire drag-to-center on photos; short tap opens zoom viewer
   list.querySelectorAll('.incident-thumb-wrap').forEach(wrap => {
     const img = wrap.querySelector('img');
     const idx = parseInt(wrap.dataset.idx);
     let startX, startY, startPosX = 50, startPosY = 50;
-    let isDragging = false;
+    let isPointerDown = false;
+    let didDrag = false;
+    const DRAG_THRESHOLD = 8;
 
     const parsePos = () => {
       const style = img.style.objectPosition || '50% 50%';
@@ -525,7 +611,9 @@ function openModal(date) {
     };
 
     const onStart = (e) => {
-      isDragging = true;
+      if (e.touches && e.touches.length > 1) return;
+      isPointerDown = true;
+      didDrag = false;
       const p = parsePos();
       startPosX = p.x;
       startPosY = p.y;
@@ -537,11 +625,12 @@ function openModal(date) {
     };
 
     const onMove = (e) => {
-      if (!isDragging) return;
+      if (!isPointerDown) return;
       const point = e.touches ? e.touches[0] : e;
       const dx = point.clientX - startX;
       const dy = point.clientY - startY;
-      // Sensitivity: bigger movement = more shift
+      if (!didDrag && Math.hypot(dx, dy) < DRAG_THRESHOLD) return;
+      didDrag = true;
       const newX = startPosX - dx / 4;
       const newY = startPosY - dy / 4;
       img.style.objectPosition = `${Math.max(0, Math.min(100, newX))}% ${Math.max(0, Math.min(100, newY))}%`;
@@ -549,11 +638,15 @@ function openModal(date) {
     };
 
     const onEnd = () => {
-      if (!isDragging) return;
-      isDragging = false;
+      if (!isPointerDown) return;
+      isPointerDown = false;
       wrap.style.cursor = 'grab';
-      const p = parsePos();
-      savePos(p.x, p.y);
+      if (didDrag) {
+        const p = parsePos();
+        savePos(p.x, p.y);
+      } else {
+        openPhotoViewer(img.src);
+      }
     };
 
     wrap.addEventListener('mousedown', onStart);
@@ -562,6 +655,7 @@ function openModal(date) {
     window.addEventListener('touchmove', onMove, { passive: false });
     window.addEventListener('mouseup', onEnd);
     window.addEventListener('touchend', onEnd);
+    window.addEventListener('touchcancel', onEnd);
   });
 
   // Wire up edit buttons
@@ -900,6 +994,299 @@ document.getElementById('syncAllBtn').onclick = async () => {
   setSyncStatus(ok ? `Sent ${list.length} incident(s); duplicates are skipped by the Sheet.` : `Couldn't reach the Sheet; ${loadQueue().length} incident(s) queued.`);
 };
 flushSyncQueue();
+
+
+// --- Pinch-zoom full-screen photo viewer ---
+const photoViewerState = {
+  scale: 1,
+  minScale: 1,
+  maxScale: 5,
+  tx: 0,
+  ty: 0,
+  pointers: new Map(),
+  pinchDist: 0,
+  pinchScale: 1,
+  pinchTx: 0,
+  pinchTy: 0,
+  pinchCX: 0,
+  pinchCY: 0,
+  dragTx: 0,
+  dragTy: 0,
+  moved: false,
+  lastTapAt: 0,
+  lastTapX: 0,
+  lastTapY: 0,
+  suppressClick: false
+};
+
+function pvEls() {
+  return {
+    root: document.getElementById('photoViewer'),
+    stage: document.getElementById('photoViewerStage'),
+    img: document.getElementById('photoViewerImg'),
+    closeBtn: document.getElementById('photoViewerClose')
+  };
+}
+
+function applyPhotoTransform() {
+  const { img } = pvEls();
+  const s = photoViewerState;
+  if (!img) return;
+  img.style.transform = `translate(${s.tx}px, ${s.ty}px) scale(${s.scale})`;
+}
+
+function clampPhotoPan() {
+  const { stage, img } = pvEls();
+  const s = photoViewerState;
+  if (!stage || !img || !img.naturalWidth) return;
+  const sw = stage.clientWidth;
+  const sh = stage.clientHeight;
+  const w = img.naturalWidth * s.scale;
+  const h = img.naturalHeight * s.scale;
+  if (w <= sw) {
+    s.tx = (sw - w) / 2;
+  } else {
+    s.tx = Math.min(0, Math.max(sw - w, s.tx));
+  }
+  if (h <= sh) {
+    s.ty = (sh - h) / 2;
+  } else {
+    s.ty = Math.min(0, Math.max(sh - h, s.ty));
+  }
+}
+
+function fitPhotoViewer() {
+  const { stage, img } = pvEls();
+  const s = photoViewerState;
+  if (!stage || !img || !img.naturalWidth) return;
+  const pad = 20;
+  const sx = (stage.clientWidth - pad * 2) / img.naturalWidth;
+  const sy = (stage.clientHeight - pad * 2) / img.naturalHeight;
+  s.minScale = Math.min(sx, sy);
+  if (!isFinite(s.minScale) || s.minScale <= 0) s.minScale = 0.1;
+  s.scale = s.minScale;
+  s.tx = (stage.clientWidth - img.naturalWidth * s.scale) / 2;
+  s.ty = (stage.clientHeight - img.naturalHeight * s.scale) / 2;
+  img.style.width = img.naturalWidth + 'px';
+  img.style.height = img.naturalHeight + 'px';
+  applyPhotoTransform();
+}
+
+function zoomPhotoAt(clientX, clientY, nextScale) {
+  const { stage, img } = pvEls();
+  const s = photoViewerState;
+  if (!stage || !img) return;
+  const rect = stage.getBoundingClientRect();
+  const x = clientX - rect.left;
+  const y = clientY - rect.top;
+  const clamped = Math.max(s.minScale, Math.min(s.maxScale, nextScale));
+  const ratio = clamped / s.scale;
+  s.tx = x - (x - s.tx) * ratio;
+  s.ty = y - (y - s.ty) * ratio;
+  s.scale = clamped;
+  clampPhotoPan();
+  applyPhotoTransform();
+}
+
+function openPhotoViewer(src) {
+  const { root, img } = pvEls();
+  if (!root || !img || !src) return;
+  photoViewerState.pointers.clear();
+  photoViewerState.moved = false;
+  photoViewerState.suppressClick = false;
+  const show = () => {
+    fitPhotoViewer();
+  };
+  img.onload = show;
+  img.src = src;
+  root.classList.add('open');
+  root.setAttribute('aria-hidden', 'false');
+  document.body.classList.add('photo-viewer-open');
+  if (img.complete && img.naturalWidth) show();
+}
+
+function closePhotoViewer() {
+  const { root, img } = pvEls();
+  if (!root) return;
+  root.classList.remove('open');
+  root.setAttribute('aria-hidden', 'true');
+  document.body.classList.remove('photo-viewer-open');
+  photoViewerState.pointers.clear();
+  if (img) {
+    img.onload = null;
+    img.removeAttribute('src');
+    img.style.transform = '';
+  }
+}
+
+function pvPointerDist(a, b) {
+  return Math.hypot(a.x - b.x, a.y - b.y);
+}
+
+function initPhotoViewer() {
+  const { root, stage, img, closeBtn } = pvEls();
+  if (!root || !stage || !img || root.dataset.ready) return;
+  root.dataset.ready = '1';
+
+  closeBtn.addEventListener('click', (e) => {
+    e.stopPropagation();
+    closePhotoViewer();
+  });
+
+  // Backdrop / empty area tap closes (not when image was panned/zoomed interaction)
+  root.addEventListener('click', (e) => {
+    if (photoViewerState.suppressClick) {
+      photoViewerState.suppressClick = false;
+      return;
+    }
+    if (e.target === root || e.target === stage) closePhotoViewer();
+  });
+
+  document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape' && root.classList.contains('open')) {
+      e.preventDefault();
+      closePhotoViewer();
+    }
+  });
+
+  stage.addEventListener('wheel', (e) => {
+    if (!root.classList.contains('open')) return;
+    e.preventDefault();
+    const factor = e.deltaY < 0 ? 1.12 : 1 / 1.12;
+    zoomPhotoAt(e.clientX, e.clientY, photoViewerState.scale * factor);
+  }, { passive: false });
+
+  const onPointerDown = (e) => {
+    if (!root.classList.contains('open')) return;
+    stage.setPointerCapture(e.pointerId);
+    photoViewerState.pointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
+    photoViewerState.moved = false;
+    if (photoViewerState.pointers.size === 1) {
+      photoViewerState.dragTx = photoViewerState.tx;
+      photoViewerState.dragTy = photoViewerState.ty;
+      photoViewerState._downX = e.clientX;
+      photoViewerState._downY = e.clientY;
+    } else if (photoViewerState.pointers.size === 2) {
+      const pts = [...photoViewerState.pointers.values()];
+      photoViewerState.pinchDist = pvPointerDist(pts[0], pts[1]);
+      photoViewerState.pinchScale = photoViewerState.scale;
+      photoViewerState.pinchTx = photoViewerState.tx;
+      photoViewerState.pinchTy = photoViewerState.ty;
+      photoViewerState.pinchCX = (pts[0].x + pts[1].x) / 2;
+      photoViewerState.pinchCY = (pts[0].y + pts[1].y) / 2;
+    }
+  };
+
+  const onPointerMove = (e) => {
+    if (!photoViewerState.pointers.has(e.pointerId)) return;
+    photoViewerState.pointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
+    const s = photoViewerState;
+
+    if (s.pointers.size === 2) {
+      const pts = [...s.pointers.values()];
+      const dist = pvPointerDist(pts[0], pts[1]);
+      if (s.pinchDist > 0) {
+        const next = s.pinchScale * (dist / s.pinchDist);
+        const cx = (pts[0].x + pts[1].x) / 2;
+        const cy = (pts[0].y + pts[1].y) / 2;
+        // Restore pinch-start transform, then zoom toward current midpoint
+        s.scale = s.pinchScale;
+        s.tx = s.pinchTx;
+        s.ty = s.pinchTy;
+        zoomPhotoAt(s.pinchCX, s.pinchCY, next);
+        // Also pan by midpoint delta
+        s.tx += cx - s.pinchCX;
+        s.ty += cy - s.pinchCY;
+        clampPhotoPan();
+        applyPhotoTransform();
+        s.moved = true;
+      }
+      e.preventDefault();
+      return;
+    }
+
+    if (s.pointers.size === 1) {
+      const dx = e.clientX - s._downX;
+      const dy = e.clientY - s._downY;
+      if (Math.hypot(dx, dy) > 4) s.moved = true;
+      if (s.scale > s.minScale + 0.001) {
+        s.tx = s.dragTx + dx;
+        s.ty = s.dragTy + dy;
+        clampPhotoPan();
+        applyPhotoTransform();
+      }
+      e.preventDefault();
+    }
+  };
+
+  const onPointerUp = (e) => {
+    if (!photoViewerState.pointers.has(e.pointerId)) return;
+    const s = photoViewerState;
+    const wasPinching = s.pointers.size >= 2;
+    s.pointers.delete(e.pointerId);
+
+    if (s.pointers.size === 1) {
+      const rem = [...s.pointers.values()][0];
+      s._downX = rem.x;
+      s._downY = rem.y;
+      s.dragTx = s.tx;
+      s.dragTy = s.ty;
+    }
+
+    if (wasPinching) {
+      s.suppressClick = true;
+      return;
+    }
+
+    // Only treat as a pan gesture when zoomed; tiny moves on the backdrop still close
+    if (s.moved && s.scale > s.minScale + 0.001) {
+      s.suppressClick = true;
+      return;
+    }
+
+    // Double-tap / double-click toggle zoom toward point
+    const now = Date.now();
+    const dt = now - s.lastTapAt;
+    const dist = Math.hypot(e.clientX - s.lastTapX, e.clientY - s.lastTapY);
+    if (dt < 320 && dist < 40) {
+      s.suppressClick = true;
+      if (s.scale > s.minScale * 1.15) {
+        fitPhotoViewer();
+      } else {
+        zoomPhotoAt(e.clientX, e.clientY, Math.min(s.maxScale, s.minScale * 2.5));
+      }
+      s.lastTapAt = 0;
+    } else {
+      s.lastTapAt = now;
+      s.lastTapX = e.clientX;
+      s.lastTapY = e.clientY;
+      // Single tap on image: do not close (backdrop / empty stage handles close)
+      if (e.target === img || (e.target === stage && s.moved)) s.suppressClick = true;
+      // If tap landed on empty stage (dark area) without a drag, allow click to close
+      if (e.target === stage && !s.moved) s.suppressClick = false;
+    }
+  };
+
+  stage.addEventListener('pointerdown', onPointerDown);
+  stage.addEventListener('pointermove', onPointerMove);
+  stage.addEventListener('pointerup', onPointerUp);
+  stage.addEventListener('pointercancel', onPointerUp);
+  stage.addEventListener('pointerleave', (e) => {
+    if (photoViewerState.pointers.has(e.pointerId)) onPointerUp(e);
+  });
+
+  // Prevent iOS bounce / page scroll while viewer open
+  const blockScroll = (e) => {
+    if (document.body.classList.contains('photo-viewer-open')) e.preventDefault();
+  };
+  document.addEventListener('touchmove', blockScroll, { passive: false });
+
+  window.addEventListener('resize', () => {
+    if (root.classList.contains('open')) fitPhotoViewer();
+  });
+}
+
+initPhotoViewer();
 
 // Close modal on outside click
 document.getElementById('modal').onclick = (e) => {
